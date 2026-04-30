@@ -1,0 +1,27 @@
+# Large local datasets
+/dataset/
+/pipeline/work/
+
+# Model checkpoints and weights
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*.hdf5
+*.weights
+*.safetensors
+
+# Large array/volume data artifacts
+*.npy
+*.npz
+*.nii
+*.nii.gz
+
+# Experiment outputs and logs
+wandb/
+mlruns/
+outputs/
+runs/
+checkpoints/
