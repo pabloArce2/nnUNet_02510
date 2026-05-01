@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import time
@@ -15,8 +16,14 @@ from monai.transforms import (
     CenterSpatialCropd,
     Compose,
     EnsureChannelFirstd,
+    EnsureTyped,
     LoadImaged,
+    RandAdjustContrastd,
     RandFlipd,
+    RandGaussianNoised,
+    RandGaussianSmoothd,
+    RandShiftIntensityd,
+    RandScaleIntensityd,
     RandSpatialCropd,
     ScaleIntensityRanged,
 )
@@ -47,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--seed", type=int, default=1234)
@@ -55,7 +62,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patch-size", type=int, nargs=3, default=[96, 96, 96], metavar=("X", "Y", "Z"))
     p.add_argument("--a-min", type=float, default=-200.0)
     p.add_argument("--a-max", type=float, default=300.0)
-    p.add_argument("--mask-ratio", type=float, default=0.35)
+    p.add_argument(
+        "--mask-ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of voxels to hide/corrupt during reconstruction (default: 0.5)",
+    )
+    p.add_argument(
+        "--masking-mode",
+        type=str,
+        default="block",
+        choices=["voxel", "block"],
+        help="voxel=random independent voxels, block=contiguous block masking (default: block)",
+    )
+    p.add_argument(
+        "--block-size",
+        type=int,
+        nargs=3,
+        default=[16, 16, 16],
+        metavar=("BX", "BY", "BZ"),
+        help="Block size for block masking (default: 16 16 16)",
+    )
     p.add_argument("--save-every", type=int, default=25)
     p.add_argument(
         "--train-split-key",
@@ -119,12 +146,49 @@ def write_latest_pointers(output_root: Path, run_dir: Path, artifact_names: list
             shutil.copy2(src, dst)
 
 
+def global_ssim_torch(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+    mu_x = x.mean()
+    mu_y = y.mean()
+    var_x = ((x - mu_x) ** 2).mean()
+    var_y = ((y - mu_y) ** 2).mean()
+    cov_xy = ((x - mu_x) * (y - mu_y)).mean()
+    num = (2.0 * mu_x * mu_y + c1) * (2.0 * cov_xy + c2)
+    den = (mu_x * mu_x + mu_y * mu_y + c1) * (var_x + var_y + c2)
+    return num / torch.clamp(den, min=1e-8)
+
+
+def build_mask(x: torch.Tensor, mask_ratio: float, masking_mode: str, block_size: tuple[int, int, int]) -> torch.Tensor:
+    if masking_mode == "voxel":
+        return (torch.rand_like(x) < mask_ratio).float()
+
+    b, c, sx, sy, sz = x.shape
+    bx, by, bz = block_size
+    bx = max(1, min(bx, sx))
+    by = max(1, min(by, sy))
+    bz = max(1, min(bz, sz))
+    mask = torch.zeros_like(x)
+    target_vox = int(math.ceil(mask_ratio * sx * sy * sz))
+    block_vox = bx * by * bz
+    blocks_per_sample = max(1, int(math.ceil(target_vox / max(block_vox, 1))))
+    for bi in range(b):
+        for _ in range(blocks_per_sample):
+            x0 = int(torch.randint(0, sx - bx + 1, (1,), device=x.device).item())
+            y0 = int(torch.randint(0, sy - by + 1, (1,), device=x.device).item())
+            z0 = int(torch.randint(0, sz - bz + 1, (1,), device=x.device).item())
+            mask[bi, :, x0 : x0 + bx, y0 : y0 + by, z0 : z0 + bz] = 1.0
+    return mask
+
+
 def main() -> None:
     args = parse_args()
     if not (0.0 < args.mask_ratio < 1.0):
         raise ValueError("--mask-ratio must be between 0 and 1")
     if args.val_interval < 1:
         raise ValueError("--val-interval must be >= 1")
+    if any(v < 1 for v in args.block_size):
+        raise ValueError("--block-size values must be >= 1")
 
     set_determinism(args.seed)
     device = pick_device(args.device)
@@ -167,6 +231,12 @@ def main() -> None:
             RandFlipd(keys=["image"], prob=0.5, spatial_axis=0),
             RandFlipd(keys=["image"], prob=0.5, spatial_axis=1),
             RandFlipd(keys=["image"], prob=0.5, spatial_axis=2),
+            RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.5),
+            RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5),
+            RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.5)),
+            RandGaussianNoised(keys=["image"], prob=0.2, mean=0.0, std=0.01),
+            RandGaussianSmoothd(keys=["image"], prob=0.15, sigma_x=(0.25, 1.0), sigma_y=(0.25, 1.0), sigma_z=(0.25, 1.0)),
+            EnsureTyped(keys=["image"]),
         ]
     )
 
@@ -183,6 +253,7 @@ def main() -> None:
                 clip=True,
             ),
             CenterSpatialCropd(keys=["image"], roi_size=tuple(args.patch_size)),
+            EnsureTyped(keys=["image"]),
         ]
     )
 
@@ -210,6 +281,7 @@ def main() -> None:
 
     model = build_unet(out_channels=1).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    block_size = tuple(int(v) for v in args.block_size)
 
     output_root = args.output_dir
     output_root.mkdir(parents=True, exist_ok=True)
@@ -238,6 +310,8 @@ def main() -> None:
         tb_writer.add_text("run/ssl_train_split", args.train_split_key)
         tb_writer.add_text("run/ssl_val_split", args.val_split_key)
         tb_writer.add_scalar("config/mask_ratio", float(args.mask_ratio), 0)
+        tb_writer.add_text("config/masking_mode", args.masking_mode)
+        tb_writer.add_text("config/block_size", str(block_size))
         tb_writer.add_scalar("config/lr", float(args.lr), 0)
         tb_writer.add_scalar("config/weight_decay", float(args.weight_decay), 0)
         print(f"TensorBoard logs: {tb_dir}")
@@ -257,7 +331,7 @@ def main() -> None:
         for batch in pbar:
             x = batch["image"].to(device)
             noise = torch.randn_like(x)
-            mask = (torch.rand_like(x) < args.mask_ratio).float()
+            mask = build_mask(x, args.mask_ratio, args.masking_mode, block_size)
             x_corrupt = x * (1.0 - mask) + noise * mask
 
             pred = model(x_corrupt)
@@ -297,28 +371,56 @@ def main() -> None:
         if val_loader is not None and (epoch % args.val_interval == 0 or epoch == args.epochs):
             model.eval()
             val_running = 0.0
+            val_full_mse_running = 0.0
+            val_full_mae_running = 0.0
+            val_psnr_running = 0.0
+            val_ssim_running = 0.0
             val_steps = 0
             with torch.no_grad():
                 for batch in val_loader:
                     x = batch["image"].to(device)
                     noise = torch.randn_like(x)
-                    mask = (torch.rand_like(x) < args.mask_ratio).float()
+                    mask = build_mask(x, args.mask_ratio, args.masking_mode, block_size)
                     x_corrupt = x * (1.0 - mask) + noise * mask
 
                     pred = model(x_corrupt)
                     denom = torch.clamp(mask.sum(), min=1.0)
                     loss = torch.sum(((pred - x) ** 2) * mask) / denom
+                    full_mse = ((pred - x) ** 2).mean()
+                    full_mae = torch.abs(pred - x).mean()
+                    psnr = 10.0 * torch.log10(torch.tensor(1.0, device=device) / torch.clamp(full_mse, min=1e-8))
+                    ssim = global_ssim_torch(pred, x, data_range=1.0)
 
                     val_running += float(loss.detach().cpu().item())
+                    val_full_mse_running += float(full_mse.detach().cpu().item())
+                    val_full_mae_running += float(full_mae.detach().cpu().item())
+                    val_psnr_running += float(psnr.detach().cpu().item())
+                    val_ssim_running += float(ssim.detach().cpu().item())
                     val_steps += 1
 
             val_loss = val_running / max(val_steps, 1)
+            val_full_mse = val_full_mse_running / max(val_steps, 1)
+            val_full_mae = val_full_mae_running / max(val_steps, 1)
+            val_psnr = val_psnr_running / max(val_steps, 1)
+            val_ssim = val_ssim_running / max(val_steps, 1)
             row["val_loss"] = val_loss
+            row["val_full_mse"] = val_full_mse
+            row["val_full_mae"] = val_full_mae
+            row["val_psnr_db"] = val_psnr
+            row["val_global_ssim"] = val_ssim
 
             if tb_writer is not None:
                 tb_writer.add_scalar("val/epoch_ssl_loss", val_loss, epoch)
+                tb_writer.add_scalar("val/full_mse", val_full_mse, epoch)
+                tb_writer.add_scalar("val/full_mae", val_full_mae, epoch)
+                tb_writer.add_scalar("val/psnr_db", val_psnr, epoch)
+                tb_writer.add_scalar("val/global_ssim", val_ssim, epoch)
 
-            print(f"Epoch {epoch:04d}: ssl_loss={mean_loss:.6f} val_ssl_loss={val_loss:.6f}")
+            print(
+                f"Epoch {epoch:04d}: ssl_loss={mean_loss:.6f} val_ssl_loss={val_loss:.6f} "
+                f"val_full_mse={val_full_mse:.6f} val_full_mae={val_full_mae:.6f} "
+                f"val_psnr={val_psnr:.3f} val_ssim={val_ssim:.4f}"
+            )
         else:
             print(f"Epoch {epoch:04d}: ssl_loss={mean_loss:.6f}")
 
