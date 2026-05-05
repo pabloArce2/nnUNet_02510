@@ -12,6 +12,49 @@ import nibabel as nib
 import numpy as np
 
 
+def repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "dataset").is_dir() and (parent / "pipeline").is_dir():
+            return parent
+    return Path.cwd().resolve()
+
+
+REPO_ROOT = repo_root()
+
+
+def resolve_repo_path(path: Path | str) -> Path:
+    candidate = Path(path)
+    if candidate.exists():
+        return candidate
+
+    if candidate.is_absolute():
+        parts = candidate.parts
+        if REPO_ROOT.name in parts:
+            repo_index = len(parts) - 1 - list(reversed(parts)).index(REPO_ROOT.name)
+            return REPO_ROOT.joinpath(*parts[repo_index + 1 :])
+        return candidate
+
+    rebased = REPO_ROOT / candidate
+    if rebased.exists():
+        return rebased
+    return candidate
+
+
+def rebase_split_paths(split_payload: dict) -> int:
+    updated = 0
+    for row in split_payload.get("cases", []):
+        for key in ("image", "label"):
+            value = row.get(key)
+            if not value:
+                continue
+            original = Path(value)
+            resolved = resolve_repo_path(original)
+            if resolved != original:
+                row[key] = str(resolved.resolve())
+                updated += 1
+    return updated
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -39,7 +82,7 @@ def preprocess_all_images(split_payload: dict, out_dir: Path) -> dict[str, str]:
     updated = {}
     for row in split_payload.get("cases", []):
         cid = row["case_id"]
-        img_path = Path(row["image"])
+        img_path = resolve_repo_path(row["image"])
         if not img_path.exists():
             raise FileNotFoundError(f"Missing image for case {cid}: {img_path}")
         nii = nib.load(str(img_path))
@@ -58,7 +101,7 @@ def preprocess_binary_labels(split_payload: dict, out_dir: Path) -> dict[str, st
         label_path = row.get("label")
         if not label_path:
             continue
-        src = Path(label_path)
+        src = resolve_repo_path(label_path)
         if not src.exists():
             raise FileNotFoundError(f"Missing label for case {cid}: {src}")
         nii = nib.load(str(src))
@@ -103,7 +146,11 @@ def main() -> None:
     parser.add_argument("--run-mode", type=str, choices=["normal", "loocv"], default="normal")
     args, passthrough = parser.parse_known_args()
 
-    split_payload = json.loads(args.split_json.read_text())
+    split_json = resolve_repo_path(args.split_json)
+    split_payload = json.loads(split_json.read_text())
+    rebased_count = rebase_split_paths(split_payload)
+    if rebased_count:
+        print(f"Rebased {rebased_count} split path(s) to current repo root: {REPO_ROOT}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     preprocessed_split = args.preprocessed_split_json or (args.output_dir / "split_preprocessed.json")

@@ -8,6 +8,16 @@ import re
 from pathlib import Path
 
 
+def repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "dataset").is_dir() and (parent / "pipeline").is_dir():
+            return parent
+    return Path.cwd().resolve()
+
+
+REPO_ROOT = repo_root()
+
+
 def nifti_stem(path: Path) -> str:
     name = path.name
     if name.endswith(".nii.gz"):
@@ -35,17 +45,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--labeled-animal-dir",
         type=Path,
-        default=Path("/home/arian-sumak/code/DTU/nnUNet_02510/dataset/labeled/animal"),
+        default=REPO_ROOT / "dataset" / "labeled" / "animal",
     )
     p.add_argument(
         "--labeled-liver-dir",
         type=Path,
-        default=Path("/home/arian-sumak/code/DTU/nnUNet_02510/dataset/labeled/liver"),
+        default=REPO_ROOT / "dataset" / "labeled" / "liver",
     )
     p.add_argument(
         "--all-ct-dir",
         type=Path,
-        default=Path("/home/arian-sumak/code/DTU/nnUNet_02510/dataset/pig_nii_unlabeled"),
+        default=REPO_ROOT / "dataset" / "pig_nii_unlabeled",
     )
     p.add_argument(
         "--val-female-case",
@@ -68,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--output-json",
         type=Path,
-        default=Path("/home/arian-sumak/code/DTU/nnUNet_02510/dataset/labeled/splits_pig_binary.json"),
+        default=REPO_ROOT / "dataset" / "labeled" / "splits_pig_binary.json",
     )
     return p.parse_args()
 
