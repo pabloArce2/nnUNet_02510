@@ -119,8 +119,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-tensorboard", action="store_true", help="Disable TensorBoard logging")
     p.add_argument(
         "--save-random-patch-every-epoch",
-        action="store_true",
-        help="Save one random training patch (image + label) per epoch to <run_dir>/debug_patches",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save 3 random training patches (image + label) at each validation step to <run_dir>/debug_patches",
     )
     p.add_argument(
         "--tensorboard-dir",
@@ -566,8 +567,8 @@ def main() -> None:
         running = 0.0
         running_fg_fraction = 0.0
         running_class_fraction = torch.zeros(args.num_classes, dtype=torch.float64)
-        sampled_patch_image = None
-        sampled_patch_label = None
+        sampled_patches: list[tuple[np.ndarray, np.ndarray]] = []
+        seen_patches = 0
         steps = 0
         pbar = tqdm(train_loader, desc=f"SEG epoch {epoch}/{args.epochs}", leave=False)
 
@@ -599,10 +600,14 @@ def main() -> None:
                 patch_idx = int(torch.randint(low=0, high=x.shape[0], size=(1,)).item())
                 candidate_image = x[patch_idx, 0].detach().cpu().numpy().astype(np.float32, copy=False)
                 candidate_label = y[patch_idx, 0].detach().cpu().numpy().astype(np.uint8, copy=False)
-                # Reservoir sampling: keep one uniformly random patch across all steps.
-                if sampled_patch_image is None or int(torch.randint(low=1, high=steps + 1, size=(1,)).item()) == 1:
-                    sampled_patch_image = candidate_image
-                    sampled_patch_label = candidate_label
+                seen_patches += 1
+                # Reservoir sampling: keep 3 uniformly random patches across all seen patches in this epoch.
+                if len(sampled_patches) < 3:
+                    sampled_patches.append((candidate_image, candidate_label))
+                else:
+                    replace_at = int(torch.randint(low=0, high=seen_patches, size=(1,)).item())
+                    if replace_at < 3:
+                        sampled_patches[replace_at] = (candidate_image, candidate_label)
 
             pbar.set_postfix(
                 loss=f"{loss_item:.5f}",
@@ -686,14 +691,16 @@ def main() -> None:
                 f"train_cls=[{', '.join(f'{v:.4f}' for v in train_class_fractions)}]"
             )
 
-        if args.save_random_patch_every_epoch and sampled_patch_image is not None and sampled_patch_label is not None:
+        should_validate = val_loader is not None and (epoch % args.val_interval == 0 or epoch == args.epochs)
+        if args.save_random_patch_every_epoch and should_validate and sampled_patches:
             patch_dir = run_dir / "debug_patches"
             patch_dir.mkdir(parents=True, exist_ok=True)
             affine = np.eye(4, dtype=np.float32)
-            img_path = patch_dir / f"epoch_{epoch:04d}_image.nii.gz"
-            lbl_path = patch_dir / f"epoch_{epoch:04d}_label.nii.gz"
-            nib.save(nib.Nifti1Image(sampled_patch_image, affine), str(img_path))
-            nib.save(nib.Nifti1Image(sampled_patch_label, affine), str(lbl_path))
+            for i, (patch_image, patch_label) in enumerate(sampled_patches, start=1):
+                img_path = patch_dir / f"epoch_{epoch:04d}_patch{i}_image.nii.gz"
+                lbl_path = patch_dir / f"epoch_{epoch:04d}_patch{i}_label.nii.gz"
+                nib.save(nib.Nifti1Image(patch_image, affine), str(img_path))
+                nib.save(nib.Nifti1Image(patch_label, affine), str(lbl_path))
 
         history.append(row)
 
