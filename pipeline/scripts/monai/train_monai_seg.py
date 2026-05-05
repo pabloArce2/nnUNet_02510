@@ -27,6 +27,7 @@ from monai.transforms import (
     RandGaussianNoised,
     RandSpatialCropd,
     ScaleIntensityRanged,
+    Spacingd,
 )
 from tqdm import tqdm
 
@@ -79,6 +80,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=2, help="Number of segmentation classes (including background)")
     p.add_argument("--a-min", type=float, default=-200.0)
     p.add_argument("--a-max", type=float, default=300.0)
+    p.add_argument(
+        "--target-spacing",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("SX", "SY", "SZ"),
+        help=(
+            "Optional voxel spacing (mm) for Spacingd normalization in train/val transforms. "
+            "Example: --target-spacing 1.5 1.5 2.0"
+        ),
+    )
     p.add_argument(
         "--gaussian-noise-prob",
         type=float,
@@ -417,6 +429,8 @@ def main() -> None:
             f"--ce-weights expects {args.num_classes} values for --num-classes={args.num_classes}, "
             f"got {len(args.ce_weights)}"
         )
+    if args.target_spacing is not None and any(v <= 0 for v in args.target_spacing):
+        raise ValueError("--target-spacing values must be > 0")
 
     if args.h5_label_dir is not None:
         try:
@@ -495,11 +509,20 @@ def main() -> None:
         else RandSpatialCropd(keys=["image", "label"], roi_size=tuple(args.patch_size), random_size=False)
     )
 
+    spacing_transform = (
+        [Spacingd(keys=["image", "label"], pixdim=tuple(float(v) for v in args.target_spacing), mode=("bilinear", "nearest"))]
+        if args.target_spacing is not None
+        else []
+    )
+    if args.target_spacing is not None:
+        print(f"Applying spacing normalization with target spacing (mm): {tuple(float(v) for v in args.target_spacing)}")
+
     train_transforms = Compose(
         [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             ScaleIntensityRanged(keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=0.0, b_max=1.0, clip=True),
+            *spacing_transform,
             crop_transform,
             RandFlipd(keys=["image", "label"], prob=float(args.flip_prob), spatial_axis=0),
             RandFlipd(keys=["image", "label"], prob=float(args.flip_prob), spatial_axis=1),
@@ -514,6 +537,7 @@ def main() -> None:
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             ScaleIntensityRanged(keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=0.0, b_max=1.0, clip=True),
+            *spacing_transform,
             EnsureTyped(keys=["image", "label"]),
         ]
     )
@@ -683,8 +707,10 @@ def main() -> None:
                     val_running += float(vloss.detach().cpu().item())
                     val_steps += 1
 
-                    pred_lbl = torch.argmax(logits, dim=1)
-                    gt_lbl = (vy[:, 0] > 0.5).long()
+                    # Compute voxel metrics on CPU to avoid large extra GPU allocations
+                    # from argmax/boolean masks on full-volume predictions.
+                    pred_lbl = torch.argmax(logits.detach().to("cpu"), dim=1)
+                    gt_lbl = (vy[:, 0].detach().to("cpu") > 0.5).long()
                     tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
                     fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
                     fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
@@ -735,8 +761,10 @@ def main() -> None:
                     tloss = criterion(logits, ty)
                     trv_running += float(tloss.detach().cpu().item())
                     trv_steps += 1
-                    pred_lbl = torch.argmax(logits, dim=1)
-                    gt_lbl = (ty[:, 0] > 0.5).long()
+                    # Compute voxel metrics on CPU to avoid large extra GPU allocations
+                    # from argmax/boolean masks on full-volume predictions.
+                    pred_lbl = torch.argmax(logits.detach().to("cpu"), dim=1)
+                    gt_lbl = (ty[:, 0].detach().to("cpu") > 0.5).long()
                     trv_tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
                     trv_fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
                     trv_fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
