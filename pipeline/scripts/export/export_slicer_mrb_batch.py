@@ -2,7 +2,7 @@
 """Batch-export one Slicer .mrb scene per CT+liver-mask case.
 
 Run with Slicer, for example:
-  Slicer --no-main-window --python-script pipeline/scripts/export_slicer_mrb_batch.py -- \
+  Slicer --no-main-window --python-script pipeline/scripts/export/export_slicer_mrb_batch.py -- \
     --ct-dir pipeline/work/stage1/ct_nifti \
     --mask-dir pipeline/work/stage1/pseudolabels/liver_masks \
     --output-dir pipeline/work/stage1/slicer_mrb
@@ -20,7 +20,7 @@ try:
 except ImportError as exc:  # pragma: no cover - runtime guard for regular Python
     raise RuntimeError(
         "This script must be run via 3D Slicer, for example:\n"
-        "  Slicer --no-main-window --python-script pipeline/scripts/export_slicer_mrb_batch.py -- ...\n"
+        "  Slicer --no-main-window --python-script pipeline/scripts/export/export_slicer_mrb_batch.py -- ...\n"
     ) from exc
 
 

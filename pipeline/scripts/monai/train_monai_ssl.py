@@ -39,7 +39,12 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Self-supervised masked reconstruction pretraining for MONAI 3D U-Net")
-    p.add_argument("--split-json", type=Path, required=True)
+    p.add_argument(
+        "--split-json",
+        type=Path,
+        default=Path("pipeline/work/monai/splits.json"),
+        help="Split JSON path (default: pipeline/work/monai/splits.json)",
+    )
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument(
         "--experiment-name",
@@ -84,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         help="Block size for block masking (default: 16 16 16)",
     )
     p.add_argument("--save-every", type=int, default=25)
+    p.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="Optional checkpoint (.pt) to resume from (loads model, optimizer, and epoch)",
+    )
     p.add_argument(
         "--train-split-key",
         type=str,
@@ -293,6 +304,7 @@ def main() -> None:
     best_path = run_dir / "ssl_best.pt"
     last_path = run_dir / "ssl_last.pt"
     global_step = 0
+    start_epoch = 1
 
     use_tensorboard = not args.no_tensorboard
     if use_tensorboard and SummaryWriter is None:
@@ -320,7 +332,33 @@ def main() -> None:
             f"(then open http://localhost:{args.tensorboard_port})"
         )
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_from is not None:
+        if not args.resume_from.is_file():
+            raise FileNotFoundError(f"--resume-from checkpoint not found: {args.resume_from}")
+        resume_ckpt = torch.load(args.resume_from, map_location="cpu", weights_only=False)
+        state = resume_ckpt.get("model_state", resume_ckpt)
+        model.load_state_dict(state)
+        optimizer_state = resume_ckpt.get("optimizer_state")
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+        resumed_epoch = int(resume_ckpt.get("epoch", 0))
+        start_epoch = resumed_epoch + 1
+        resumed_best = resume_ckpt.get("val_loss")
+        if resumed_best is None:
+            resumed_best = resume_ckpt.get("mean_loss")
+        if resumed_best is not None:
+            best_loss = float(resumed_best)
+        print(
+            f"Resumed from {args.resume_from} (epoch={resumed_epoch}); "
+            f"continuing at epoch {start_epoch} through {args.epochs}"
+        )
+        if start_epoch > args.epochs:
+            raise ValueError(
+                f"Resumed epoch ({resumed_epoch}) is already >= --epochs ({args.epochs}). "
+                "Increase --epochs to continue training."
+            )
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         epoch_start = time.time()
         epoch_loss = 0.0

@@ -75,3 +75,59 @@ Additional recent work on residual encoder presets and benchmarking:
 nnU-Net is developed and maintained by the Applied Computer Vision Lab (ACVL) of [Helmholtz Imaging](http://helmholtz-imaging.de)
 and the [Division of Medical Image Computing](https://www.dkfz.de/en/mic/index.php) at the
 [German Cancer Research Center (DKFZ)](https://www.dkfz.de/en/index.html).
+
+## Project Pipeline (H5 Labeled -> MONAI Segmentation)
+
+For this repository, labeled ILASTIK `.h5` files can be preprocessed automatically to NIfTI labels and then used directly by the active-learning segmentation loop.
+
+### 1) Preprocess all labeled H5 files
+
+This runs folder-wide preprocessing and writes standardized NIfTI files:
+
+- Orientation/axis standardization (to `ZYX` volume order)
+- Probability labels -> discrete liver mask
+- Artifact cleanup (small islands, holes, smoothing morphology)
+- Optional resampling to consistent spacing
+- Naming convention: `<case>_0000.nii.gz` (image) and `<case>.nii.gz` (label)
+
+```bash
+python pipeline/scripts/preprocess_h5_labeled_folder.py \
+  --input-dir dataset/pig_h5_labeled \
+  --output-images-dir pipeline/work/h5_preprocessed/images \
+  --output-labels-dir pipeline/work/h5_preprocessed/labels \
+  --fill-holes \
+  --axis-order zyx
+```
+
+Use `--axis-order xyz` if your H5 arrays are stored as `(X,Y,Z)`.
+
+### 2) Train segmentation using preprocessed labels
+
+Use already preprocessed labels:
+
+```bash
+python pipeline/scripts/train_monai_seg.py \
+  --split-json pipeline/work/monai/splits.json \
+  --output-dir pipeline/work/monai/models/seg \
+  --preprocessed-label-dir pipeline/work/h5_preprocessed/labels
+```
+
+Or run preprocessing automatically inside training:
+
+```bash
+python pipeline/scripts/train_monai_seg.py \
+  --split-json pipeline/work/monai/splits.json \
+  --output-dir pipeline/work/monai/models/seg \
+  --h5-label-dir dataset/pig_h5_labeled \
+  --h5-fill-holes \
+  --h5-axis-order zyx
+```
+
+When `--h5-label-dir` is used, `train_monai_seg.py` preprocesses all `.h5` files first, writes labels to `--preprocess-output-dir` (default: `<output-dir>/preprocessed_labels`), and automatically maps them to split case IDs.
+
+### 3) Visual QC and comparison
+
+To compare preprocessed NIfTI output against the original NIfTI CT:
+
+- Load original CT (`*_0000.nii.gz`) and preprocessed label (`*.nii.gz`) in 3D Slicer or ITK-SNAP.
+- Verify alignment and removal of label artifacts.

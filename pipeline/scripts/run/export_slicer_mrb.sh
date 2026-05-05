@@ -30,7 +30,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CT_DIR="$ROOT_DIR/$STAGE1_ROOT/ct_nifti"
 MASK_DIR="$ROOT_DIR/$STAGE1_ROOT/pseudolabels/liver_masks"
 OUT_DIR="$ROOT_DIR/$STAGE1_ROOT/slicer_mrb"
-SCRIPT_PATH="$ROOT_DIR/pipeline/scripts/export_slicer_mrb_batch.py"
+SCRIPT_PATH="$ROOT_DIR/pipeline/scripts/export/export_slicer_mrb_batch.py"
 
 if [[ ! -d "$CT_DIR" ]]; then
   echo "CT directory not found: $CT_DIR" >&2

@@ -20,7 +20,7 @@ PRED_ROOT="$2"
 OUTPUT_DIR="$3"
 
 CMD=(
-  python "$ROOT_DIR/pipeline/scripts/mine_hard_cases.py"
+  python "$ROOT_DIR/pipeline/scripts/analysis/mine_hard_cases.py"
   --ct-dir "$CT_DIR"
   --pred-dir "$PRED_ROOT/pred_masks"
   --output-dir "$OUTPUT_DIR"

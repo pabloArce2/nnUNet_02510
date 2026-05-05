@@ -20,12 +20,12 @@ mkdir -p "$WORK_DIR"
 
 if [[ -n "$INPUT_NIFTI_DIR" ]]; then
   echo "[1/4] Preparing CT NIfTI from existing NIfTI folder"
-  python "$ROOT_DIR/pipeline/scripts/prepare_nifti_from_nii.py" \
+  python "$ROOT_DIR/pipeline/scripts/dataset/prepare_nifti_from_nii.py" \
     --input-dir "$INPUT_NIFTI_DIR" \
     --output-dir "$CT_DIR"
 else
   echo "[1/4] Preparing CT NIfTI from .npy dataset"
-  python "$ROOT_DIR/pipeline/scripts/prepare_nifti_from_npy.py" \
+  python "$ROOT_DIR/pipeline/scripts/npy/prepare_nifti_from_npy.py" \
     --input-dir "$INPUT_NPY_DIR" \
     --output-dir "$CT_DIR" \
     --default-spacing 1.0 1.0 1.0 \
@@ -33,7 +33,7 @@ else
 fi
 
 SPLIT_CMD=(
-  python "$ROOT_DIR/pipeline/scripts/create_monai_splits.py"
+  python "$ROOT_DIR/pipeline/scripts/monai/create_monai_splits.py"
   --ct-dir "$CT_DIR"
   --output-json "$SPLIT_JSON"
 )
@@ -49,7 +49,7 @@ echo "[2/4] Building split file"
 "${SPLIT_CMD[@]}"
 
 echo "[3/4] SSL pretraining"
-python "$ROOT_DIR/pipeline/scripts/train_monai_ssl.py" \
+python "$ROOT_DIR/pipeline/scripts/monai/train_monai_ssl.py" \
   --split-json "$SPLIT_JSON" \
   --output-dir "$SSL_DIR" \
   --device "$DEVICE"
@@ -65,13 +65,13 @@ SSL_OUT="$WORK_DIR/experiments/ssl_finetune"
 
 echo "[4/4] Supervised training (baseline + SSL-init)"
 
-bash "$ROOT_DIR/pipeline/scripts/run_monai_supervised_cycle.sh" \
+bash "$ROOT_DIR/pipeline/scripts/run/run_monai_supervised_cycle.sh" \
   "$CT_DIR" \
   "$LABEL_DIR" \
   "$BASE_OUT" \
   "$DEVICE"
 
-bash "$ROOT_DIR/pipeline/scripts/run_monai_supervised_cycle.sh" \
+bash "$ROOT_DIR/pipeline/scripts/run/run_monai_supervised_cycle.sh" \
   "$CT_DIR" \
   "$LABEL_DIR" \
   "$SSL_OUT" \

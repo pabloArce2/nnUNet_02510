@@ -42,18 +42,18 @@ fi
 mkdir -p "$OUTPUT_ROOT"
 
 echo "[1/3] Prepare input NIfTI files"
-python "$ROOT_DIR/pipeline/scripts/prepare_nifti_from_nii.py" \
+python "$ROOT_DIR/pipeline/scripts/dataset/prepare_nifti_from_nii.py" \
   --input-dir "$INPUT_NIFTI_DIR" \
   --output-dir "$CT_NIFTI_DIR"
 
 echo "[2/3] Run TotalSegmentator liver-only (device=$DEVICE)"
-bash "$ROOT_DIR/pipeline/scripts/run_totalseg_liver_batch.sh" \
+bash "$ROOT_DIR/pipeline/scripts/run/run_totalseg_liver_batch.sh" \
   "$CT_NIFTI_DIR" \
   "$PSEUDO_DIR" \
   "$DEVICE"
 
 echo "[3/3] Build minimal examples (0 background, 1 liver)"
-python "$ROOT_DIR/pipeline/scripts/build_liver_examples.py" \
+python "$ROOT_DIR/pipeline/scripts/dataset/build_liver_examples.py" \
   --ct-nifti-dir "$CT_NIFTI_DIR" \
   --liver-mask-dir "$PSEUDO_DIR/liver_masks" \
   --output-dir "$EXAMPLES_DIR" \

@@ -37,7 +37,7 @@ SEG_DIR="$OUTPUT_ROOT/models/seg"
 mkdir -p "$OUTPUT_ROOT"
 
 SPLIT_CMD=(
-  python "$ROOT_DIR/pipeline/scripts/create_monai_splits.py"
+  python "$ROOT_DIR/pipeline/scripts/monai/create_monai_splits.py"
   --ct-dir "$CT_DIR"
   --label-dir "$LABEL_DIR"
   --output-json "$SPLIT_JSON"
@@ -50,7 +50,7 @@ echo "[1/4] Building split JSON"
 "${SPLIT_CMD[@]}"
 
 SEG_CMD=(
-  python "$ROOT_DIR/pipeline/scripts/train_monai_seg.py"
+  python "$ROOT_DIR/pipeline/scripts/monai/train_monai_seg.py"
   --split-json "$SPLIT_JSON"
   --output-dir "$SEG_DIR"
   --device "$DEVICE"
@@ -76,7 +76,7 @@ PRED_DIR="$OUTPUT_ROOT/predictions/test/$RUN_TAG"
 METRICS_CSV="$OUTPUT_ROOT/metrics/${RUN_TAG}_test_metrics.csv"
 
 echo "[3/4] Predicting test set"
-python "$ROOT_DIR/pipeline/scripts/predict_monai_seg.py" \
+python "$ROOT_DIR/pipeline/scripts/monai/predict_monai_seg.py" \
   --split-json "$SPLIT_JSON" \
   --checkpoint "$SEG_CKPT" \
   --output-dir "$PRED_DIR" \
@@ -85,7 +85,7 @@ python "$ROOT_DIR/pipeline/scripts/predict_monai_seg.py" \
   --device "$DEVICE"
 
 echo "[4/4] Evaluating"
-python "$ROOT_DIR/pipeline/scripts/evaluate_segmentation.py" \
+python "$ROOT_DIR/pipeline/scripts/analysis/evaluate_segmentation.py" \
   --ct-dir "$CT_DIR" \
   --pred-dir "$PRED_DIR/pred_masks" \
   --label-dir "$LABEL_DIR" \

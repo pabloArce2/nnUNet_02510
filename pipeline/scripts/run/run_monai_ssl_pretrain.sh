@@ -31,17 +31,17 @@ SSL_OUT="$OUTPUT_ROOT/models/ssl"
 mkdir -p "$OUTPUT_ROOT"
 
 echo "[1/3] Preparing CT files"
-python "$ROOT_DIR/pipeline/scripts/prepare_nifti_from_nii.py" \
+python "$ROOT_DIR/pipeline/scripts/dataset/prepare_nifti_from_nii.py" \
   --input-dir "$INPUT_NIFTI_DIR" \
   --output-dir "$CT_DIR"
 
 echo "[2/3] Building split JSON"
-python "$ROOT_DIR/pipeline/scripts/create_monai_splits.py" \
+python "$ROOT_DIR/pipeline/scripts/monai/create_monai_splits.py" \
   --ct-dir "$CT_DIR" \
   --output-json "$SPLIT_JSON"
 
 echo "[3/3] SSL pretraining"
-python "$ROOT_DIR/pipeline/scripts/train_monai_ssl.py" \
+python "$ROOT_DIR/pipeline/scripts/monai/train_monai_ssl.py" \
   --split-json "$SPLIT_JSON" \
   --output-dir "$SSL_OUT" \
   --device "$DEVICE"
