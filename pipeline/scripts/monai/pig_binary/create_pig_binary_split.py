@@ -84,9 +84,20 @@ def main() -> None:
     for p in sorted(args.labeled_liver_dir.glob("*.nii")) + sorted(args.labeled_liver_dir.glob("*.nii.gz")):
         labeled_masks[parse_label_case_id(p)] = str(p.resolve())
 
-    train_ids = sorted([cid for cid in labeled_images if cid in labeled_masks])
-    if len(train_ids) != 3:
-        raise RuntimeError(f"Expected 3 labeled train cases, found {len(train_ids)}: {train_ids}")
+    missing_masks = sorted([cid for cid in labeled_images if cid not in labeled_masks])
+    missing_images = sorted([cid for cid in labeled_masks if cid not in labeled_images])
+    if missing_masks or missing_images:
+        raise RuntimeError(
+            "Labeled animal/liver files must be fully paired by case_id.\n"
+            f"Missing liver masks for: {missing_masks}\n"
+            f"Missing animal images for: {missing_images}"
+        )
+
+    train_ids = sorted(labeled_images.keys())
+    if not train_ids:
+        raise RuntimeError(
+            f"No labeled pairs found in {args.labeled_animal_dir} and {args.labeled_liver_dir}"
+        )
 
     all_ct_cases = {}
     for p in sorted(args.all_ct_dir.rglob("*.nii")) + sorted(args.all_ct_dir.rglob("*.nii.gz")):
@@ -120,7 +131,7 @@ def main() -> None:
 
     payload = {
         "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "description": "Pig liver binary segmentation split. Supervised train uses 3 labeled female cases.",
+        "description": "Pig liver binary segmentation split. Supervised train uses all labeled animal/liver pairs.",
         "splits": {
             "ssl_pretrain": sorted(all_ct_cases.keys()),
             "labeled": train_ids,
