@@ -207,6 +207,30 @@ def compute_seg_metrics(tp: int, fp: int, fn: int) -> tuple[float, float, float]
     return float(dice), float(iou), float(precision)
 
 
+def compute_binary_confusion_metrics(tp: int, fp: int, fn: int, tn: int) -> dict[str, float | int]:
+    precision = tp / max((tp + fp), 1)
+    recall = tp / max((tp + fn), 1)
+    specificity = tn / max((tn + fp), 1)
+    accuracy = (tp + tn) / max((tp + fp + fn + tn), 1)
+    dice_fg = (2.0 * tp) / max((2 * tp + fp + fn), 1)
+    dice_bg = (2.0 * tn) / max((2 * tn + fp + fn), 1)
+    balanced_accuracy = 0.5 * (recall + specificity)
+    macro_dice = 0.5 * (dice_fg + dice_bg)
+    return {
+        "tp": int(tp),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tn": int(tn),
+        "precision": float(precision),
+        "recall": float(recall),
+        "specificity": float(specificity),
+        "accuracy": float(accuracy),
+        "balanced_accuracy": float(balanced_accuracy),
+        "dice_bg": float(dice_bg),
+        "macro_dice": float(macro_dice),
+    }
+
+
 def sanitize_name(name: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip())
     clean = re.sub(r"-+", "-", clean).strip("-_")
@@ -698,6 +722,7 @@ def main() -> None:
             tp = 0
             fp = 0
             fn = 0
+            tn = 0
             with torch.no_grad():
                 for vbatch in val_loader:
                     vx = vbatch["image"].to(device)
@@ -714,25 +739,46 @@ def main() -> None:
                     tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
                     fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
                     fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
+                    tn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 0).sum().item())
 
             val_loss = val_running / max(val_steps, 1)
             val_dice, val_iou, val_precision = compute_seg_metrics(tp=tp, fp=fp, fn=fn)
+            val_extra = compute_binary_confusion_metrics(tp=tp, fp=fp, fn=fn, tn=tn)
             row["val_loss"] = float(val_loss)
             row["val_dice"] = val_dice
             row["val_iou"] = float(val_iou)
             row["val_precision"] = float(val_precision)
+            row["val_recall"] = float(val_extra["recall"])
+            row["val_specificity"] = float(val_extra["specificity"])
+            row["val_accuracy"] = float(val_extra["accuracy"])
+            row["val_balanced_accuracy"] = float(val_extra["balanced_accuracy"])
+            row["val_dice_bg"] = float(val_extra["dice_bg"])
+            row["val_macro_dice"] = float(val_extra["macro_dice"])
+            row["val_tp"] = int(val_extra["tp"])
+            row["val_fp"] = int(val_extra["fp"])
+            row["val_fn"] = int(val_extra["fn"])
+            row["val_tn"] = int(val_extra["tn"])
             if tb_writer is not None:
                 tb_writer.add_scalar("val/loss", float(val_loss), epoch)
                 tb_writer.add_scalar("val/dice", val_dice, epoch)
                 tb_writer.add_scalar("val/iou", float(val_iou), epoch)
                 tb_writer.add_scalar("val/precision", float(val_precision), epoch)
+                tb_writer.add_scalar("val/recall", float(val_extra["recall"]), epoch)
+                tb_writer.add_scalar("val/specificity", float(val_extra["specificity"]), epoch)
+                tb_writer.add_scalar("val/accuracy", float(val_extra["accuracy"]), epoch)
+                tb_writer.add_scalar("val/balanced_accuracy", float(val_extra["balanced_accuracy"]), epoch)
+                tb_writer.add_scalar("val/dice_bg", float(val_extra["dice_bg"]), epoch)
+                tb_writer.add_scalar("val/macro_dice", float(val_extra["macro_dice"]), epoch)
             print(
                 "Epoch "
                 f"{epoch:04d}: train_loss={train_loss:.6f} "
                 f"train_fg={train_fg_fraction:.4f} "
                 f"train_cls=[{', '.join(f'{v:.4f}' for v in train_class_fractions)}] "
                 f"val_loss={val_loss:.6f} val_dice={val_dice:.5f} "
-                f"val_iou={val_iou:.5f} val_precision={val_precision:.5f}"
+                f"val_iou={val_iou:.5f} val_precision={val_precision:.5f} "
+                f"val_recall={float(val_extra['recall']):.5f} "
+                f"val_specificity={float(val_extra['specificity']):.5f} "
+                f"val_macro_dice={float(val_extra['macro_dice']):.5f}"
             )
         else:
             val_dice = None
@@ -753,6 +799,7 @@ def main() -> None:
             trv_tp = 0
             trv_fp = 0
             trv_fn = 0
+            trv_tn = 0
             with torch.no_grad():
                 for tbatch in train_eval_loader:
                     tx = tbatch["image"].to(device)
@@ -768,21 +815,42 @@ def main() -> None:
                     trv_tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
                     trv_fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
                     trv_fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
+                    trv_tn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 0).sum().item())
             trv_loss = trv_running / max(trv_steps, 1)
             trv_dice, trv_iou, trv_precision = compute_seg_metrics(tp=trv_tp, fp=trv_fp, fn=trv_fn)
+            trv_extra = compute_binary_confusion_metrics(tp=trv_tp, fp=trv_fp, fn=trv_fn, tn=trv_tn)
             row["train_vol_loss"] = float(trv_loss)
             row["train_vol_dice"] = float(trv_dice)
             row["train_vol_iou"] = float(trv_iou)
             row["train_vol_precision"] = float(trv_precision)
+            row["train_vol_recall"] = float(trv_extra["recall"])
+            row["train_vol_specificity"] = float(trv_extra["specificity"])
+            row["train_vol_accuracy"] = float(trv_extra["accuracy"])
+            row["train_vol_balanced_accuracy"] = float(trv_extra["balanced_accuracy"])
+            row["train_vol_dice_bg"] = float(trv_extra["dice_bg"])
+            row["train_vol_macro_dice"] = float(trv_extra["macro_dice"])
+            row["train_vol_tp"] = int(trv_extra["tp"])
+            row["train_vol_fp"] = int(trv_extra["fp"])
+            row["train_vol_fn"] = int(trv_extra["fn"])
+            row["train_vol_tn"] = int(trv_extra["tn"])
             if tb_writer is not None:
                 tb_writer.add_scalar("train_vol/loss", float(trv_loss), epoch)
                 tb_writer.add_scalar("train_vol/dice", float(trv_dice), epoch)
                 tb_writer.add_scalar("train_vol/iou", float(trv_iou), epoch)
                 tb_writer.add_scalar("train_vol/precision", float(trv_precision), epoch)
+                tb_writer.add_scalar("train_vol/recall", float(trv_extra["recall"]), epoch)
+                tb_writer.add_scalar("train_vol/specificity", float(trv_extra["specificity"]), epoch)
+                tb_writer.add_scalar("train_vol/accuracy", float(trv_extra["accuracy"]), epoch)
+                tb_writer.add_scalar("train_vol/balanced_accuracy", float(trv_extra["balanced_accuracy"]), epoch)
+                tb_writer.add_scalar("train_vol/dice_bg", float(trv_extra["dice_bg"]), epoch)
+                tb_writer.add_scalar("train_vol/macro_dice", float(trv_extra["macro_dice"]), epoch)
             print(
                 f"Epoch {epoch:04d}: train_vol_loss={trv_loss:.6f} "
                 f"train_vol_dice={trv_dice:.5f} train_vol_iou={trv_iou:.5f} "
-                f"train_vol_precision={trv_precision:.5f}"
+                f"train_vol_precision={trv_precision:.5f} "
+                f"train_vol_recall={float(trv_extra['recall']):.5f} "
+                f"train_vol_specificity={float(trv_extra['specificity']):.5f} "
+                f"train_vol_macro_dice={float(trv_extra['macro_dice']):.5f}"
             )
 
         should_validate = val_loader is not None and (epoch % args.val_interval == 0 or epoch == args.epochs)
@@ -822,8 +890,38 @@ def main() -> None:
     with csv_path.open("w", newline="") as f:
         fieldnames = ["epoch", "train_loss", "train_fg_fraction"]
         fieldnames += [f"train_class_fraction_c{i}" for i in range(args.num_classes)]
-        fieldnames += ["val_loss", "val_dice", "val_iou", "val_precision"]
-        fieldnames += ["train_vol_loss", "train_vol_dice", "train_vol_iou", "train_vol_precision"]
+        fieldnames += [
+            "val_loss",
+            "val_dice",
+            "val_iou",
+            "val_precision",
+            "val_recall",
+            "val_specificity",
+            "val_accuracy",
+            "val_balanced_accuracy",
+            "val_dice_bg",
+            "val_macro_dice",
+            "val_tp",
+            "val_fp",
+            "val_fn",
+            "val_tn",
+        ]
+        fieldnames += [
+            "train_vol_loss",
+            "train_vol_dice",
+            "train_vol_iou",
+            "train_vol_precision",
+            "train_vol_recall",
+            "train_vol_specificity",
+            "train_vol_accuracy",
+            "train_vol_balanced_accuracy",
+            "train_vol_dice_bg",
+            "train_vol_macro_dice",
+            "train_vol_tp",
+            "train_vol_fp",
+            "train_vol_fn",
+            "train_vol_tn",
+        ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in history:
