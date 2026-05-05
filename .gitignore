@@ -25,3 +25,5 @@ mlruns/
 outputs/
 runs/
 checkpoints/
+
+.venv/

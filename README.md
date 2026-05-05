@@ -3,7 +3,7 @@
 This repository now uses a MONAI 3D U-Net workflow with self-supervised pretraining and later supervised fine-tuning.
 
 Runbook:
-- [Pipeline runbook](/home/arian-sumak/code/DTU/nnUNet_02510/pipeline/README.md)
+- [Pipeline runbook](pipeline/README.md)
 
 ## Current status fit (no labels yet)
 
