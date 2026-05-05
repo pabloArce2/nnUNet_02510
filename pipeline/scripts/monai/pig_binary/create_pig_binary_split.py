@@ -70,6 +70,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/home/arian-sumak/code/DTU/nnUNet_02510/dataset/labeled/splits_pig_binary.json"),
     )
+    p.add_argument(
+        "--labeled-val-case",
+        type=str,
+        default=None,
+        help="Optional labeled case id to place in labeled validation split",
+    )
+    p.add_argument(
+        "--labeled-val-count",
+        type=int,
+        default=1,
+        help="Number of labeled cases held out for validation when --labeled-val-case is not set",
+    )
     return p.parse_args()
 
 
@@ -93,17 +105,35 @@ def main() -> None:
             f"Missing animal images for: {missing_images}"
         )
 
-    train_ids = sorted(labeled_images.keys())
-    if not train_ids:
+    labeled_ids = sorted(labeled_images.keys())
+    if not labeled_ids:
         raise RuntimeError(
             f"No labeled pairs found in {args.labeled_animal_dir} and {args.labeled_liver_dir}"
         )
+    if args.labeled_val_count < 0:
+        raise RuntimeError(f"--labeled-val-count must be >= 0, got {args.labeled_val_count}")
+    if args.labeled_val_count >= len(labeled_ids):
+        raise RuntimeError(
+            f"--labeled-val-count ({args.labeled_val_count}) must be smaller than "
+            f"number of labeled cases ({len(labeled_ids)})"
+        )
+
+    if args.labeled_val_case is not None:
+        val_labeled = normalize_case_id(args.labeled_val_case)
+        if val_labeled not in labeled_ids:
+            raise RuntimeError(
+                f"--labeled-val-case {val_labeled} not found in labeled pairs: {labeled_ids}"
+            )
+        val_ids = [val_labeled]
+    else:
+        val_ids = labeled_ids[-args.labeled_val_count :] if args.labeled_val_count > 0 else []
+    train_ids = [cid for cid in labeled_ids if cid not in set(val_ids)]
 
     all_ct_cases = {}
     for p in sorted(args.all_ct_dir.rglob("*.nii")) + sorted(args.all_ct_dir.rglob("*.nii.gz")):
         all_ct_cases[normalize_case_id(nifti_stem(p))] = str(p.resolve())
 
-    for cid in train_ids:
+    for cid in labeled_ids:
         all_ct_cases[cid] = labeled_images[cid]
 
     val_case = normalize_case_id(args.val_female_case)
@@ -134,10 +164,10 @@ def main() -> None:
         "description": "Pig liver binary segmentation split. Supervised train uses all labeled animal/liver pairs.",
         "splits": {
             "ssl_pretrain": sorted(all_ct_cases.keys()),
-            "labeled": train_ids,
-            "unlabeled_only": sorted([cid for cid in all_ct_cases if cid not in set(train_ids)]),
+            "labeled": labeled_ids,
+            "unlabeled_only": sorted([cid for cid in all_ct_cases if cid not in set(labeled_ids)]),
             "train": train_ids,
-            "val": [],
+            "val": val_ids,
             "test": [],
             "val_unlabeled": val_unlabeled,
             "test_unlabeled": test_unlabeled,
@@ -145,9 +175,9 @@ def main() -> None:
         "cases": case_rows,
         "counts": {
             "all_cases": len(all_ct_cases),
-            "labeled_cases": len(train_ids),
+            "labeled_cases": len(labeled_ids),
             "train": len(train_ids),
-            "val": 0,
+            "val": len(val_ids),
             "test": 0,
             "val_unlabeled": len(val_unlabeled),
             "test_unlabeled": len(test_unlabeled),
@@ -157,7 +187,9 @@ def main() -> None:
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"Wrote split file: {args.output_json}")
+    print(f"Labeled total: {labeled_ids}")
     print(f"Train labeled: {train_ids}")
+    print(f"Val labeled: {val_ids}")
     print(f"Val unlabeled: {val_unlabeled}")
     print(f"Test unlabeled: {test_unlabeled}")
 
