@@ -67,6 +67,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda|mps")
     p.add_argument("--patch-size", type=int, nargs=3, default=[96, 96, 96], metavar=("X", "Y", "Z"))
     p.add_argument("--val-interval", type=int, default=5)
+    p.add_argument(
+        "--train-full-volume-interval",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, evaluate full-volume train metrics every N epochs using sliding-window inference. "
+            "Useful for one-case overfit debugging."
+        ),
+    )
     p.add_argument("--num-classes", type=int, default=2, help="Number of segmentation classes (including background)")
     p.add_argument("--a-min", type=float, default=-200.0)
     p.add_argument("--a-max", type=float, default=300.0)
@@ -177,6 +186,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--h5-opening-radius", type=int, default=1)
     p.add_argument("--h5-fill-holes", action="store_true")
     return p.parse_args()
+
+
+def compute_seg_metrics(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
+    dice = (2.0 * tp) / max((2 * tp + fp + fn), 1)
+    iou = tp / max((tp + fp + fn), 1)
+    precision = tp / max((tp + fp), 1)
+    return float(dice), float(iou), float(precision)
 
 
 def sanitize_name(name: str) -> str:
@@ -523,6 +539,17 @@ def main() -> None:
         if val_ds is not None
         else None
     )
+    train_eval_loader = (
+        DataLoader(
+            Dataset(data=train_data, transform=val_transforms),
+            batch_size=1,
+            shuffle=False,
+            num_workers=max(1, args.num_workers // 2),
+            pin_memory=(device.type == "cuda"),
+        )
+        if args.train_full_volume_interval > 0
+        else None
+    )
 
     model = build_unet(out_channels=args.num_classes).to(device)
     if args.init_ssl_checkpoint:
@@ -663,9 +690,7 @@ def main() -> None:
                     fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
 
             val_loss = val_running / max(val_steps, 1)
-            val_dice = (2.0 * tp) / max((2 * tp + fp + fn), 1)
-            val_iou = tp / max((tp + fp + fn), 1)
-            val_precision = tp / max((tp + fp), 1)
+            val_dice, val_iou, val_precision = compute_seg_metrics(tp=tp, fp=fp, fn=fn)
             row["val_loss"] = float(val_loss)
             row["val_dice"] = val_dice
             row["val_iou"] = float(val_iou)
@@ -689,6 +714,47 @@ def main() -> None:
                 f"Epoch {epoch:04d}: train_loss={train_loss:.6f} "
                 f"train_fg={train_fg_fraction:.4f} "
                 f"train_cls=[{', '.join(f'{v:.4f}' for v in train_class_fractions)}]"
+            )
+
+        should_eval_train_full = (
+            train_eval_loader is not None
+            and (epoch % args.train_full_volume_interval == 0 or epoch == args.epochs)
+        )
+        if should_eval_train_full:
+            model.eval()
+            trv_running = 0.0
+            trv_steps = 0
+            trv_tp = 0
+            trv_fp = 0
+            trv_fn = 0
+            with torch.no_grad():
+                for tbatch in train_eval_loader:
+                    tx = tbatch["image"].to(device)
+                    ty = tbatch["label"].to(device)
+                    logits = sliding_window_inference(tx, tuple(args.patch_size), sw_batch_size=1, predictor=model)
+                    tloss = criterion(logits, ty)
+                    trv_running += float(tloss.detach().cpu().item())
+                    trv_steps += 1
+                    pred_lbl = torch.argmax(logits, dim=1)
+                    gt_lbl = (ty[:, 0] > 0.5).long()
+                    trv_tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
+                    trv_fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
+                    trv_fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
+            trv_loss = trv_running / max(trv_steps, 1)
+            trv_dice, trv_iou, trv_precision = compute_seg_metrics(tp=trv_tp, fp=trv_fp, fn=trv_fn)
+            row["train_vol_loss"] = float(trv_loss)
+            row["train_vol_dice"] = float(trv_dice)
+            row["train_vol_iou"] = float(trv_iou)
+            row["train_vol_precision"] = float(trv_precision)
+            if tb_writer is not None:
+                tb_writer.add_scalar("train_vol/loss", float(trv_loss), epoch)
+                tb_writer.add_scalar("train_vol/dice", float(trv_dice), epoch)
+                tb_writer.add_scalar("train_vol/iou", float(trv_iou), epoch)
+                tb_writer.add_scalar("train_vol/precision", float(trv_precision), epoch)
+            print(
+                f"Epoch {epoch:04d}: train_vol_loss={trv_loss:.6f} "
+                f"train_vol_dice={trv_dice:.5f} train_vol_iou={trv_iou:.5f} "
+                f"train_vol_precision={trv_precision:.5f}"
             )
 
         should_validate = val_loader is not None and (epoch % args.val_interval == 0 or epoch == args.epochs)
@@ -729,6 +795,7 @@ def main() -> None:
         fieldnames = ["epoch", "train_loss", "train_fg_fraction"]
         fieldnames += [f"train_class_fraction_c{i}" for i in range(args.num_classes)]
         fieldnames += ["val_loss", "val_dice", "val_iou", "val_precision"]
+        fieldnames += ["train_vol_loss", "train_vol_dice", "train_vol_iou", "train_vol_precision"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in history:
