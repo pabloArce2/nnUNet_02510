@@ -624,11 +624,19 @@ def main() -> None:
         print(f"Loaded {matched} matching parameters from SSL checkpoint")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    ce_weights = torch.tensor(args.ce_weights, dtype=torch.float32, device=device)
-    try:
-        criterion = DiceCELoss(to_onehot_y=True, softmax=True, ce_weight=ce_weights)
-    except TypeError:
-        criterion = DiceCELoss(to_onehot_y=True, softmax=True, weight=ce_weights)
+
+    def make_dicece_loss(ce_weights_tensor: torch.Tensor) -> DiceCELoss:
+        try:
+            return DiceCELoss(to_onehot_y=True, softmax=True, ce_weight=ce_weights_tensor)
+        except TypeError:
+            return DiceCELoss(to_onehot_y=True, softmax=True, weight=ce_weights_tensor)
+
+    ce_weights_train = torch.tensor(args.ce_weights, dtype=torch.float32, device=device)
+    criterion = make_dicece_loss(ce_weights_train)
+    criterion_cpu = None
+    if args.eval_on_cpu_output:
+        ce_weights_cpu = torch.tensor(args.ce_weights, dtype=torch.float32, device=torch.device("cpu"))
+        criterion_cpu = make_dicece_loss(ce_weights_cpu)
 
     best_dice = -1.0
     history = []
@@ -758,7 +766,8 @@ def main() -> None:
                             sw_device=device,
                             device=("cpu" if args.eval_on_cpu_output else device),
                         )
-                        vloss = criterion(logits, vy.to(logits.device))
+                        active_criterion = criterion_cpu if logits.device.type == "cpu" and criterion_cpu is not None else criterion
+                        vloss = active_criterion(logits, vy.to(logits.device))
                     val_running += float(vloss.detach().cpu().item())
                     val_steps += 1
 
@@ -855,7 +864,8 @@ def main() -> None:
                             sw_device=device,
                             device=("cpu" if args.eval_on_cpu_output else device),
                         )
-                        tloss = criterion(logits, ty.to(logits.device))
+                        active_criterion = criterion_cpu if logits.device.type == "cpu" and criterion_cpu is not None else criterion
+                        tloss = active_criterion(logits, ty.to(logits.device))
                     trv_running += float(tloss.detach().cpu().item())
                     trv_steps += 1
                     # Compute voxel metrics on CPU to avoid large extra GPU allocations
