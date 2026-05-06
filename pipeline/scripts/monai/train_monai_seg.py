@@ -69,6 +69,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patch-size", type=int, nargs=3, default=[96, 96, 96], metavar=("X", "Y", "Z"))
     p.add_argument("--val-interval", type=int, default=5)
     p.add_argument(
+        "--eval-sw-batch-size",
+        type=int,
+        default=1,
+        help="Sliding-window mini-batch size for full-volume eval inference (lower is safer for VRAM).",
+    )
+    p.add_argument(
+        "--eval-on-cpu-output",
+        action="store_true",
+        help="Accumulate sliding-window outputs on CPU during eval to reduce peak GPU memory.",
+    )
+    p.add_argument(
+        "--eval-amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use autocast mixed precision during eval inference/loss on CUDA (default: enabled).",
+    )
+    p.add_argument(
         "--train-full-volume-interval",
         type=int,
         default=0,
@@ -448,6 +465,8 @@ def main() -> None:
         raise ValueError("--gaussian-noise-prob must be in [0, 1]")
     if args.train_num_samples < 1:
         raise ValueError("--train-num-samples must be >= 1")
+    if args.eval_sw_batch_size < 1:
+        raise ValueError("--eval-sw-batch-size must be >= 1")
     if len(args.ce_weights) != args.num_classes:
         raise ValueError(
             f"--ce-weights expects {args.num_classes} values for --num-classes={args.num_classes}, "
@@ -723,12 +742,23 @@ def main() -> None:
             fp = 0
             fn = 0
             tn = 0
-            with torch.no_grad():
+            val_pred_fg_vox = 0
+            val_gt_fg_vox = 0
+            val_total_vox = 0
+            with torch.inference_mode():
                 for vbatch in val_loader:
                     vx = vbatch["image"].to(device)
                     vy = vbatch["label"].to(device)
-                    logits = sliding_window_inference(vx, tuple(args.patch_size), sw_batch_size=1, predictor=model)
-                    vloss = criterion(logits, vy)
+                    with torch.autocast(device_type="cuda", enabled=(device.type == "cuda" and args.eval_amp)):
+                        logits = sliding_window_inference(
+                            vx,
+                            tuple(args.patch_size),
+                            sw_batch_size=int(args.eval_sw_batch_size),
+                            predictor=model,
+                            sw_device=device,
+                            device=("cpu" if args.eval_on_cpu_output else device),
+                        )
+                        vloss = criterion(logits, vy.to(logits.device))
                     val_running += float(vloss.detach().cpu().item())
                     val_steps += 1
 
@@ -736,6 +766,9 @@ def main() -> None:
                     # from argmax/boolean masks on full-volume predictions.
                     pred_lbl = torch.argmax(logits.detach().to("cpu"), dim=1)
                     gt_lbl = (vy[:, 0].detach().to("cpu") > 0.5).long()
+                    val_pred_fg_vox += int((pred_lbl == 1).sum().item())
+                    val_gt_fg_vox += int((gt_lbl == 1).sum().item())
+                    val_total_vox += int(gt_lbl.numel())
                     tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
                     fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
                     fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
@@ -758,6 +791,8 @@ def main() -> None:
             row["val_fp"] = int(val_extra["fp"])
             row["val_fn"] = int(val_extra["fn"])
             row["val_tn"] = int(val_extra["tn"])
+            row["val_pred_fg_fraction"] = float(val_pred_fg_vox / max(val_total_vox, 1))
+            row["val_gt_fg_fraction"] = float(val_gt_fg_vox / max(val_total_vox, 1))
             if tb_writer is not None:
                 tb_writer.add_scalar("val/loss", float(val_loss), epoch)
                 tb_writer.add_scalar("val/dice", val_dice, epoch)
@@ -769,6 +804,8 @@ def main() -> None:
                 tb_writer.add_scalar("val/balanced_accuracy", float(val_extra["balanced_accuracy"]), epoch)
                 tb_writer.add_scalar("val/dice_bg", float(val_extra["dice_bg"]), epoch)
                 tb_writer.add_scalar("val/macro_dice", float(val_extra["macro_dice"]), epoch)
+                tb_writer.add_scalar("val/pred_fg_fraction", float(row["val_pred_fg_fraction"]), epoch)
+                tb_writer.add_scalar("val/gt_fg_fraction", float(row["val_gt_fg_fraction"]), epoch)
             print(
                 "Epoch "
                 f"{epoch:04d}: train_loss={train_loss:.6f} "
@@ -778,7 +815,9 @@ def main() -> None:
                 f"val_iou={val_iou:.5f} val_precision={val_precision:.5f} "
                 f"val_recall={float(val_extra['recall']):.5f} "
                 f"val_specificity={float(val_extra['specificity']):.5f} "
-                f"val_macro_dice={float(val_extra['macro_dice']):.5f}"
+                f"val_macro_dice={float(val_extra['macro_dice']):.5f} "
+                f"val_pred_fg={float(row['val_pred_fg_fraction']):.5f} "
+                f"val_gt_fg={float(row['val_gt_fg_fraction']):.5f}"
             )
         else:
             val_dice = None
@@ -800,18 +839,32 @@ def main() -> None:
             trv_fp = 0
             trv_fn = 0
             trv_tn = 0
-            with torch.no_grad():
+            trv_pred_fg_vox = 0
+            trv_gt_fg_vox = 0
+            trv_total_vox = 0
+            with torch.inference_mode():
                 for tbatch in train_eval_loader:
                     tx = tbatch["image"].to(device)
                     ty = tbatch["label"].to(device)
-                    logits = sliding_window_inference(tx, tuple(args.patch_size), sw_batch_size=1, predictor=model)
-                    tloss = criterion(logits, ty)
+                    with torch.autocast(device_type="cuda", enabled=(device.type == "cuda" and args.eval_amp)):
+                        logits = sliding_window_inference(
+                            tx,
+                            tuple(args.patch_size),
+                            sw_batch_size=int(args.eval_sw_batch_size),
+                            predictor=model,
+                            sw_device=device,
+                            device=("cpu" if args.eval_on_cpu_output else device),
+                        )
+                        tloss = criterion(logits, ty.to(logits.device))
                     trv_running += float(tloss.detach().cpu().item())
                     trv_steps += 1
                     # Compute voxel metrics on CPU to avoid large extra GPU allocations
                     # from argmax/boolean masks on full-volume predictions.
                     pred_lbl = torch.argmax(logits.detach().to("cpu"), dim=1)
                     gt_lbl = (ty[:, 0].detach().to("cpu") > 0.5).long()
+                    trv_pred_fg_vox += int((pred_lbl == 1).sum().item())
+                    trv_gt_fg_vox += int((gt_lbl == 1).sum().item())
+                    trv_total_vox += int(gt_lbl.numel())
                     trv_tp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 1).sum().item())
                     trv_fp += int(torch.logical_and(pred_lbl == 1, gt_lbl == 0).sum().item())
                     trv_fn += int(torch.logical_and(pred_lbl == 0, gt_lbl == 1).sum().item())
@@ -833,6 +886,8 @@ def main() -> None:
             row["train_vol_fp"] = int(trv_extra["fp"])
             row["train_vol_fn"] = int(trv_extra["fn"])
             row["train_vol_tn"] = int(trv_extra["tn"])
+            row["train_vol_pred_fg_fraction"] = float(trv_pred_fg_vox / max(trv_total_vox, 1))
+            row["train_vol_gt_fg_fraction"] = float(trv_gt_fg_vox / max(trv_total_vox, 1))
             if tb_writer is not None:
                 tb_writer.add_scalar("train_vol/loss", float(trv_loss), epoch)
                 tb_writer.add_scalar("train_vol/dice", float(trv_dice), epoch)
@@ -844,13 +899,17 @@ def main() -> None:
                 tb_writer.add_scalar("train_vol/balanced_accuracy", float(trv_extra["balanced_accuracy"]), epoch)
                 tb_writer.add_scalar("train_vol/dice_bg", float(trv_extra["dice_bg"]), epoch)
                 tb_writer.add_scalar("train_vol/macro_dice", float(trv_extra["macro_dice"]), epoch)
+                tb_writer.add_scalar("train_vol/pred_fg_fraction", float(row["train_vol_pred_fg_fraction"]), epoch)
+                tb_writer.add_scalar("train_vol/gt_fg_fraction", float(row["train_vol_gt_fg_fraction"]), epoch)
             print(
                 f"Epoch {epoch:04d}: train_vol_loss={trv_loss:.6f} "
                 f"train_vol_dice={trv_dice:.5f} train_vol_iou={trv_iou:.5f} "
                 f"train_vol_precision={trv_precision:.5f} "
                 f"train_vol_recall={float(trv_extra['recall']):.5f} "
                 f"train_vol_specificity={float(trv_extra['specificity']):.5f} "
-                f"train_vol_macro_dice={float(trv_extra['macro_dice']):.5f}"
+                f"train_vol_macro_dice={float(trv_extra['macro_dice']):.5f} "
+                f"train_vol_pred_fg={float(row['train_vol_pred_fg_fraction']):.5f} "
+                f"train_vol_gt_fg={float(row['train_vol_gt_fg_fraction']):.5f}"
             )
 
         should_validate = val_loader is not None and (epoch % args.val_interval == 0 or epoch == args.epochs)
@@ -905,6 +964,8 @@ def main() -> None:
             "val_fp",
             "val_fn",
             "val_tn",
+            "val_pred_fg_fraction",
+            "val_gt_fg_fraction",
         ]
         fieldnames += [
             "train_vol_loss",
@@ -921,6 +982,8 @@ def main() -> None:
             "train_vol_fp",
             "train_vol_fn",
             "train_vol_tn",
+            "train_vol_pred_fg_fraction",
+            "train_vol_gt_fg_fraction",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

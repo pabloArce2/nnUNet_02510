@@ -1,12 +1,9 @@
-# MONAI Pipeline: SSL -> Segmentation -> Targeted Corrections
+# MONAI Pipeline (Pig Binary)
 
-This pipeline implements your intended comparison:
-
-1. `Model 1`: 3D U-Net from scratch
-2. `Model 2`: SSL-pretrained 3D U-Net
-3. `Model 3`: SSL-pretrained 3D U-Net + targeted corrected hard cases
-
-It is designed to run even when you currently have zero labels.
+Current flow:
+1. Build split metadata (`create_pig_binary_split.py`)
+2. Wrapper preprocessing + train (`train_monai_seg_pig_binary.py`)
+3. Optional SSL pretraining (`train_monai_ssl.py`) and SSL initialization during segmentation training
 
 ## 1) Install
 
@@ -16,157 +13,71 @@ Install PyTorch first (matching your CUDA/CPU setup), then:
 pip install -r pipeline/requirements.txt
 ```
 
-## 2) Run self-supervision now (no labels needed)
+## 2) Create pig-binary split JSON
 
 ```bash
-bash pipeline/scripts/run_monai_ssl_pretrain.sh dataset/pig_nii_unlabeled
+python pipeline/scripts/monai/pig_binary/create_pig_binary_split.py \
+  --output-json dataset/labeled/pig_binary/splits_pig_binary.json
 ```
 
-Default outputs:
+Output:
+- `dataset/labeled/pig_binary/splits_pig_binary.json`
 
-- `pipeline/work/monai/ct_nifti/`
-- `pipeline/work/monai/splits.json`
-- `pipeline/work/monai/models/ssl/ssl_best.pt`
-- `pipeline/work/monai/models/ssl/tensorboard/` (training metrics for TensorBoard)
-
-Notes:
-
-- All CTs are used for SSL via masked reconstruction.
-- Input scanning is recursive, so files inside subfolders are included automatically.
-- Supervised `train/val/test` in `splits.json` will be empty until labels exist.
-- Split assignment defaults to `stable_hash`, so train/val/test stays consistent across reruns.
-
-Monitor SSL training in TensorBoard (run in a second terminal while training is running):
+## 3) Train pig-binary segmentation (wrapper)
 
 ```bash
-tensorboard --logdir pipeline/work/monai/models/ssl/tensorboard --port 6006
+python pipeline/scripts/monai/pig_binary/train_monai_seg_pig_binary.py \
+  --split-json dataset/labeled/pig_binary/splits_pig_binary.json \
+  --output-dir pipeline/runs/monai_pig_binary
 ```
 
-Then open: `http://localhost:6006`
+Wrapper behavior:
+- rebases paths to current repo
+- canonicalizes CT orientation
+- converts labels to binary liver masks (`label > 0`)
+- writes `split_preprocessed.json`
+- calls `train_monai_seg.py` with passthrough args
 
-## 3) Add ilastik labels and train segmentation
-
-Place labels as:
-
-- `<label_dir>/<case_id>.nii.gz`
-
-where `<case_id>` matches CT name without `_0000.nii.gz`.
-
-### Baseline (from scratch)
+## 4) Optional SSL pretraining
 
 ```bash
-bash pipeline/scripts/run_monai_supervised_cycle.sh \
-  pipeline/work/monai/ct_nifti \
-  path/to/ilastik_labels \
-  pipeline/work/monai_baseline
+python pipeline/scripts/monai/train_monai_ssl.py \
+  --split-json dataset/labeled/pig_binary/splits_pig_binary.json \
+  --output-dir pipeline/runs/monai_ssl
 ```
 
-### SSL-initialized
+Use the resulting checkpoint with:
+- `train_monai_seg.py --init-ssl-checkpoint <path-to-ssl-checkpoint>`
 
-```bash
-bash pipeline/scripts/run_monai_supervised_cycle.sh \
-  pipeline/work/monai/ct_nifti \
-  path/to/ilastik_labels \
-  pipeline/work/monai_ssl_finetune \
-  auto \
-  pipeline/work/monai/models/ssl/ssl_best.pt
-```
+## 5) Core scripts
 
-## 4) Mine hard cases for targeted correction
+- `pipeline/scripts/monai/pig_binary/create_pig_binary_split.py`
+- `pipeline/scripts/monai/pig_binary/train_monai_seg_pig_binary.py`
+- `pipeline/scripts/monai/train_monai_seg.py`
+- `pipeline/scripts/monai/train_monai_ssl.py`
+- `pipeline/scripts/monai/predict_monai_seg.py`
 
-```bash
-bash pipeline/scripts/run_mine_hard_cases.sh \
-  pipeline/work/monai/ct_nifti \
-  pipeline/work/monai_ssl_finetune/predictions/test \
-  pipeline/work/monai_ssl_finetune/hard_case_review
-```
+## 6) Segmentation metrics currently tracked
 
-You get:
+Validation (`val_*`):
+- `val_loss`
+- `val_dice`, `val_iou`, `val_precision`
+- `val_recall`, `val_specificity`, `val_accuracy`
+- `val_balanced_accuracy`, `val_dice_bg`, `val_macro_dice`
+- `val_tp`, `val_fp`, `val_fn`, `val_tn`
 
-- `hard_case_ranking.csv`
-- `selected_cases.txt`
-- `review_ct/` + `review_pred/`
-- `corrected_labels/` (you fill this)
+Patch distribution diagnostics:
+- `train_fg_fraction`
+- `train_class_fraction_c*`
 
-Correct selected hard cases in ilastik and save to `corrected_labels/<case_id>.nii.gz`.
+Optional train full-volume metrics (`train_vol_*`) when `--train-full-volume-interval > 0`.
 
-## 5) Retrain with targeted corrections
+Outputs:
+- `seg_history.csv`
+- `seg_history.json`
+- TensorBoard logs under `<run_dir>/tensorboard`
 
-```bash
-bash pipeline/scripts/run_monai_supervised_cycle.sh \
-  pipeline/work/monai/ct_nifti \
-  path/to/ilastik_labels \
-  pipeline/work/monai_ssl_plus_corrections \
-  auto \
-  pipeline/work/monai/models/ssl/ssl_best.pt \
-  pipeline/work/monai_ssl_finetune/hard_case_review/corrected_labels
-```
+## 7) CLI reference
 
-## 6) Core scripts
-
-- `create_monai_splits.py`: builds case index + train/val/test split metadata
-- `train_monai_ssl.py`: masked reconstruction pretraining on all CTs
-- `train_monai_seg.py`: supervised liver segmentation, optionally SSL-initialized
-- `predict_monai_seg.py`: inference for any split in split JSON
-- `evaluate_segmentation.py`: Dice, IoU, precision, FP volume, volume error, HU difference
-- `mine_hard_cases.py`: ranks likely failure cases for efficient correction
-
-## 7) Expected metric outputs
-
-`evaluate_segmentation.py` writes per-case CSV with:
-
-- Dice
-- IoU
-- Precision
-- False positive volume (ml)
-- Predicted vs GT liver volume and volume error
-- GT vs predicted mean liver HU and absolute HU difference
-
-## 8) Keeping test set fixed
-
-Use `create_monai_splits.py --fixed-test-cases path/to/test_case_ids.txt` once you decide your held-out set.
-You can also set `--split-mode seeded_random` if you want the old random-with-seed behavior.
-
-File format: one `case_id` per line.
-
-## 9) Training/validation logs
-
-`train_monai_seg.py` writes:
-
-- `models/seg/seg_history.json`
-- `models/seg/seg_history.csv`
-
-Tracked per epoch:
-
-- `train_loss`
-- `val_loss` (on validation epochs)
-- `val_dice`
-- `val_iou`
-- `val_precision`
-
-`train_monai_seg.py` also writes TensorBoard logs under `<output_dir>/tensorboard`:
-
-- `train/step_loss`
-- `train/epoch_loss`
-- `val/loss`
-- `val/dice`
-- `val/iou`
-- `val/precision`
-
-`train_monai_ssl.py` now also writes TensorBoard metrics:
-
-- `train/step_ssl_loss`
-- `train/step_mask_fraction`
-- `train/epoch_ssl_loss`
-- `train/epoch_mask_fraction`
-- `val/epoch_ssl_loss` (when `splits.val` exists)
-- `train/lr`
-- `train/epoch_seconds`
-- `train/steps_per_second`
-
-SSL validation behavior:
-
-- Training split key defaults to `splits.ssl_pretrain`
-- Validation split key defaults to `splits.val`
-- Overlapping case ids are removed from SSL training automatically to avoid leakage
-- Configure with `--train-split-key`, `--val-split-key`, and `--val-interval`
+See:
+- `pipeline/docs/monai_metrics_cli_reference.md`

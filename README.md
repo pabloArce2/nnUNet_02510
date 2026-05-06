@@ -1,53 +1,40 @@
 # Pig Liver Segmentation Pipeline (MONAI + SSL)
 
-This repository now uses a MONAI 3D U-Net workflow with self-supervised pretraining and later supervised fine-tuning.
+This repository contains a MONAI-based 3D liver segmentation pipeline for pig CT data, including:
+- supervised binary liver segmentation
+- optional SSL pretraining on unlabeled CT
+- preprocessing, label/image alignment, and training diagnostics
 
-Runbook:
+Main runbook:
 - [Pipeline runbook](pipeline/README.md)
 
-## Current status fit (no labels yet)
+Additional reference:
+- [MONAI metrics + CLI reference](pipeline/docs/monai_metrics_cli_reference.md)
 
-You can already run the SSL stage on all unlabeled pig CT scans.
+## Quick start
 
 ```bash
 pip install -r pipeline/requirements.txt
-bash pipeline/scripts/run_monai_ssl_pretrain.sh dataset/pig_nii_unlabeled
 ```
 
-This produces:
-
-- `pipeline/work/monai/ct_nifti/` (standardized `*_0000.nii.gz`)
-- `pipeline/work/monai/splits.json` (stable train/val/test metadata; supervised splits empty until labels exist)
-- `pipeline/work/monai/models/ssl/ssl_best.pt`
-
-SSL training also writes TensorBoard logs at:
-
-- `pipeline/work/monai/models/ssl/tensorboard`
-
-View them with:
+Create pig-binary split JSON:
 
 ```bash
-tensorboard --logdir pipeline/work/monai/models/ssl/tensorboard --port 6006
+python pipeline/scripts/monai/pig_binary/create_pig_binary_split.py
 ```
 
-## When labels are available
-
-Use ilastik masks (`<case_id>.nii.gz`) and run:
+Train pig-binary segmentation (wrapper does CT canonicalization + binary mask conversion):
 
 ```bash
-bash pipeline/scripts/run_monai_supervised_cycle.sh \
-  pipeline/work/monai/ct_nifti \
-  path/to/ilastik_labels \
-  pipeline/work/monai_supervised \
-  auto \
-  pipeline/work/monai/models/ssl/ssl_best.pt
+python pipeline/scripts/monai/pig_binary/train_monai_seg_pig_binary.py \
+  --split-json dataset/labeled/pig_binary/splits_pig_binary.json \
+  --output-dir pipeline/runs/monai_pig_binary
 ```
 
-Then mine hard cases:
+Optional SSL pretraining:
 
 ```bash
-bash pipeline/scripts/run_mine_hard_cases.sh \
-  pipeline/work/monai/ct_nifti \
-  pipeline/work/monai_supervised/predictions/test \
-  pipeline/work/monai_supervised/hard_case_review
+python pipeline/scripts/monai/train_monai_ssl.py \
+  --split-json dataset/labeled/pig_binary/splits_pig_binary.json \
+  --output-dir pipeline/runs/monai_ssl
 ```
